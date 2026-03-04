@@ -1,0 +1,92 @@
+version: '3.8'
+
+# Docker Compose for Linux (requires nvidia-docker2)
+# Usage: docker-compose -f docker-compose.linux.yml up -d
+
+services:
+  inference-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: satellite-inference-pipeline:latest
+    container_name: inference-pipeline
+    restart: unless-stopped
+    
+    # Environment variables
+    # Note: Do NOT set CUDA_VISIBLE_DEVICES or NVIDIA_VISIBLE_DEVICES
+    # nvidia-container-toolkit handles this automatically when using runtime: nvidia
+    environment:
+      - PYTHONUNBUFFERED=1
+      - USE_WATCHDOG_IN_DOCKER=1
+    
+    # GPU support for Linux (requires nvidia-docker2)
+    runtime: nvidia
+    
+    # Volume mounts (all read-write for full user access)
+    volumes:
+      # Mount input directory (watch for new images)
+      - ./data/incoming:/app/data/incoming
+      
+      # Mount output directories (persist results)
+      - ./artifacts:/app/artifacts
+      
+      # Mount state directory (persist queue and cache)
+      - ./state:/app/state
+      
+      # Mount logs directory
+      - ./logs:/app/logs
+      
+      # Mount models directory
+      - ./models:/app/models
+      
+      # Mount config directory
+      - ./config:/app/config
+    
+    # Ports
+    ports:
+      - "8092:8092"  # Dashboard port
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits (optional, adjust based on your system)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '8'
+    #       memory: 16G
+    #     reservations:
+    #       cpus: '2'
+    #       memory: 4G
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Optional: Separate dashboard service
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: satellite-inference-pipeline:latest
+    container_name: inference-dashboard
+    entrypoint: ["sh", "-c"]
+    command: ["if [ -f /app/config/pipeline.yaml ]; then CONFIG=/app/config/pipeline.yaml; else CONFIG=/app/config/pipeline.yaml.default; fi && /opt/conda/bin/conda run --no-capture-output -n inference python /app/dashboard_server.py --config \"$CONFIG\""]
+    ports:
+      - "8093:8092"  # Different port to avoid conflict
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./config:/app/config
+    depends_on:
+      - inference-pipeline
+    profiles:
+      - dashboard-only
+

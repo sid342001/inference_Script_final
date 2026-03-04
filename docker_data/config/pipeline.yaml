@@ -1,0 +1,198 @@
+# Satellite Inference Pipeline Configuration - Docker Default
+# This is the default config shipped with the Docker image
+# Mount your own config/pipeline.yaml to override these settings
+#
+# IMPORTANT: All paths in this file use Docker container paths (/app/...)
+# Mount your host directories to these paths when running the container
+
+# Directory to watch for new satellite images
+watcher:
+  input_dir: "/app/data/incoming"  # Docker path - mount your data here: -v /host/data:/app/data
+  recursive: true                  # Watch subdirectories recursively
+  include_extensions: [".tif", ".tiff", ".jp2", ".img"]  # Supported image formats
+  settle_time_seconds: 10          # Wait for file to finish copying before processing
+  poll_interval_seconds: 10        # How often to scan for new files (seconds) - lower for faster detection
+  max_inflight_jobs: 32            # Maximum jobs in queue (pending + processing)
+  
+  # Folder Identity Filtering (Optional)
+  # Only process images from specified folders. Images directly in input_dir get identity "root".
+  # If not specified or empty, all folders are processed.
+  # Supports regex patterns for flexible matching (e.g., ["project_.*", "test_.*"])
+  # folder_identities: ["carto", "maxar", "qgis", "SAR"]  # Uncomment and customize
+  folder_identities: ["carto", "maxar", "qgis", "SAR","jp2"]  # List of folder names or regex patterns
+  
+  # Optional: Custom regex to extract folder identity from file path
+  # Example: "incoming/([^/]+)/.*" extracts the first folder name after 'incoming/'
+  # folder_identity_regex: null
+
+# Job queue configuration
+# Mount state directory: -v /host/state:/app/state
+queue:
+  persistence_path: "/app/state/queue.json"  # Queue state file (persists across restarts)
+  max_retries: 3                             # Retry failed jobs 3 times before quarantining
+  retry_backoff_seconds: 60                  # Wait 60s between retries (gives time for transient issues to resolve)
+  quarantine_dir: "/app/state/quarantine"    # Permanently failed jobs go here
+  # Insight: Jobs are retried automatically for transient errors (file locks, network issues, etc.)
+
+# Worker configuration
+workers:
+  max_concurrent_jobs: 4                    # Process 4 images simultaneously (adjust based on GPU memory)
+  batch_size: 4                             # Process 4 tiles per batch (adjust based on GPU memory)
+  tile_cache_dir: "/app/state/tile_cache"   # Cache for processed tiles (speeds up reprocessing)
+  hybrid_mode: true                         # Enable hybrid mode: Load all models on all GPUs for dynamic assignment
+  gpu_balancing_strategy: "least_busy"       # Options: "least_busy" (recommended), "round_robin", "least_queued"
+  job_timeout_seconds: 3600                 # Maximum time per job (1 hour) - prevents infinite hangs
+  # Insight: Hybrid mode provides better GPU utilization in multi-GPU setups by dynamically assigning jobs to least busy GPU
+
+# Tiling configuration
+# This is the GLOBAL default tiling configuration.
+# Individual models can override these settings using per-model 'tile:' configuration.
+# Use per-model tiling when models were trained on different tile sizes.
+tiling:
+  tile_size: 512                            # Size of each tile in pixels (width and height)
+  overlap: 256                               # Overlap between tiles (prevents edge artifacts and ensures boundary detection)
+  normalization_mode: "auto"                 # Auto-normalize pixel values
+  allow_resample: true                       # Allow resampling if image doesn't match tile size
+  iou_threshold: 0.8                         # IoU threshold for cross-tile NMS (0.0-1.0) - removes duplicate detections
+  ioma_threshold: 0.75                      # IoMA threshold for cross-tile NMS (0.0-1.0) - additional deduplication
+  # Insight: Overlap should typically be 25-50% of tile_size. Higher overlap = better edge detection but slower processing.
+
+# GPU configuration
+# Update device IDs based on your GPU setup
+gpus:
+  - id: "gpu0"
+    device: "cuda:0"
+  # Uncomment for additional GPUs:
+  # - id: "gpu1"
+  #   device: "cuda:1"
+
+# Model configuration
+# Update paths to point to your models in /app/models/
+# Mount models: -v /host/models:/app/models
+models:
+  - name: "Yolo_plane_x"
+    weights_path: "/app/models/Yolo_plane_x.pt"  # Docker path - mount models here
+    type: "yolo"                                  # "yolo" or "yolo_obb"
+    device: "cuda:0"                              # Which GPU (ignored in hybrid_mode)
+    confidence_threshold: 0.5                     # Minimum confidence score (0.0-1.0)
+    
+    # Model-Specific Folder Filtering (Optional)
+    # Controls which folder identities this model processes
+    all_folders: false                           # If true, process ALL folders
+    folder_identities: ["qgis", "SAR","jp2","carto"]           # Only process these folders (supports regex)
+    # Insight: Use folder filtering to apply specialized models to specific image sources
+    
+    # Per-Model Tiling Configuration (Optional - overrides global tiling)
+    # CRITICAL: Tile size MUST match the tile size used during model training!
+    # Uncomment and adjust if your model was trained on a different tile size
+    tile:
+      tile_size: 512                            # Model-specific tile size (MUST match training)
+      overlap: 256                              # Model-specific overlap (typically 25-50% of tile_size)
+      normalization_mode: "auto"
+      allow_resample: true
+      iou_threshold: 0.8                         # IoU threshold for cross-tile NMS
+      ioma_threshold: 0.75                      # IoMA threshold for cross-tile NMS
+    # Insight: Per-model tiling allows mixing models trained on different resolutions
+    
+    outputs:
+      write_tile_previews: false                  # Save tile preview images (useful for debugging)
+      summary_csv: true                           # Generate CSV summaries with detection details
+
+  # Example second model (uncomment and configure):
+  - name: "yolo_obb"
+    weights_path: "/app/models/yolo11n-obb.pt"  # Docker path
+    type: "yolo_obb"                            # Oriented bounding boxes (rotated boxes)
+    device: "cuda:0"
+    confidence_threshold: 0.5
+    
+    # Model-Specific Folder Filtering
+    all_folders: false
+    folder_identities: ["carto", "maxar","jp2"]
+    
+    # Per-Model Tiling Configuration
+    # Example: Model trained on 1024px tiles while global config uses 512px
+    tile:
+      tile_size: 640                           # Different tile size (MUST match training)
+      overlap: 320                              # Different overlap (typically 25-50% of tile_size)
+      normalization_mode: "auto"
+      allow_resample: true
+      iou_threshold: 0.75
+      ioma_threshold: 0.7
+    # Insight: Larger tile sizes (1024px) can detect larger objects but use more GPU memory
+    
+    outputs:
+      write_tile_previews: false
+      summary_csv: true
+  - name: "Yolo_plane_p"
+    weights_path: "/app/models/Yolo_plane_p.pt"  # Docker path - mount models here
+    type: "yolo"                                  # "yolo" or "yolo_obb"
+    device: "cuda:0"                              # Which GPU (ignored in hybrid_mode)
+    confidence_threshold: 0.5                     # Minimum confidence score (0.0-1.0)
+    
+    # Model-Specific Folder Filtering (Optional)
+    # Controls which folder identities this model processes
+    all_folders: false                           # If true, process ALL folders
+    folder_identities: ["carto","qgis", "SAR","jp2"]           # Only process these folders (supports regex)
+    # Insight: Use folder filtering to apply specialized models to specific image sources
+    
+    # Per-Model Tiling Configuration (Optional - overrides global tiling)
+    # CRITICAL: Tile size MUST match the tile size used during model training!
+    # Uncomment and adjust if your model was trained on a different tile size
+    tile:
+      tile_size: 512                            # Model-specific tile size (MUST match training)
+      overlap: 256                              # Model-specific overlap (typically 25-50% of tile_size)
+      normalization_mode: "auto"
+      allow_resample: true
+      iou_threshold: 0.8                         # IoU threshold for cross-tile NMS
+      ioma_threshold: 0.75                      # IoMA threshold for cross-tile NMS
+    # Insight: Per-model tiling allows mixing models trained on different resolutions
+    
+    outputs:
+      write_tile_previews: false                  # Save tile preview images (useful for debugging)
+      summary_csv: true                           # Generate CSV summaries with detection details
+
+# Artifacts (output) configuration
+# Mount artifacts directory: -v /host/artifacts:/app/artifacts
+artifacts:
+  # Main output directories - organized by folder identity
+  # Structure: success_dir/{folder_identity}/{image_name}_{job_id}/...
+  success_dir: "/app/artifacts/success"  # Successful job outputs
+  failure_dir: "/app/artifacts/failure"  # Failed job outputs
+  # Insight: Outputs are organized by folder identity (e.g., success/carto/, success/qgis/) for easy management
+  
+  # Deprecated directories (kept for backward compatibility)
+  combined_dir: "/app/artifacts/combined"  # DEPRECATED: Not used
+  per_image_log_dir: "/app/artifacts/logs"  # DEPRECATED: Not used
+  
+  temp_dir: "/app/artifacts/tmp"  # Temporary files during processing
+  
+  # Centralized output directories - flat structure for easy access
+  combined_inferences_dir: "/app/artifacts/combined_inferences"  # All combined GeoJSON files (one per image)
+  model_outputs_dir: "/app/artifacts/model_outputs"  # All per-model outputs (GeoJSONs and CSVs)
+  # Insight: Centralized dirs provide a single location to find all outputs, regardless of folder identity
+  
+  # Daily logs contain MAIN PIPELINE LOGS (watcher, workers, orchestrator activity)
+  # Individual image logs are in success_dir/{folder_identity}/{image_name}/ or failure_dir/
+  daily_logs_dir: "/app/artifacts/daily_logs"  # Daily logs: YYYY-MM-DD/pipeline.log
+  # Insight: Daily logs show the entire pipeline activity, not individual image processing details
+  
+  manifest_format: "json"  # Manifest format (currently only "json" supported)
+  preview_format: "png"    # Preview image format ("png", "jpg", "jpeg")
+
+# Logging configuration
+logging:
+  level: "INFO"
+  log_dir: "/app/logs/pipeline"  # Docker path
+  per_image_level: "DEBUG"
+
+# Health monitoring
+health:
+  heartbeat_path: "/app/artifacts/health/status.json"  # Docker path
+  interval_seconds: 15
+
+# Dashboard configuration
+dashboard:
+  enabled: true
+  host: "0.0.0.0"  # Listen on all interfaces in Docker
+  port: 8093
+

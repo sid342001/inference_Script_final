@@ -1,0 +1,69 @@
+# Docker ignore file - excludes files from Docker build context
+
+# Git
+.git/
+.gitignore
+.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.conda/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation (keep only essential)
+*.md
+!README.md
+
+# Keep default Docker config
+!config/pipeline.yaml.docker
+
+# Data and outputs (will be mounted as volumes)
+data/
+artifacts/
+state/
+logs/
+models/*.pt
+models/*.pth
+models/*.onnx
+
+# Keep directory structure but ignore contents
+!data/.gitkeep
+!artifacts/.gitkeep
+!state/.gitkeep
+!logs/.gitkeep
+!models/.gitkeep
+
+# Build artifacts
+*.log
+*.tmp
+
+# Test files
+test_*
+*_test.py
+
+# Backup files
+*.bak
+*.backup
+

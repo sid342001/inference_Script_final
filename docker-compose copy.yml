@@ -1,0 +1,149 @@
+services:
+  backend:
+    image: sat-annotator-backend:latest
+    container_name: sat-annotator-backend
+    ports:
+      - "9000:9000"
+    environment:
+      - API_HOST=192.168.1.103
+      - API_PORT=9000
+      - EXPLORE_APP_PORT=7080
+      - FRONTEND_PORT=5173
+      - INFER_SERVICE_URL=http://127.0.0.1:8105
+      - REDIS_URL=redis://redis:6379/0
+      - KEYCLOAK_URL=http://192.168.1.103:8080
+      - KEYCLOAK_REALM=SatRealm
+      - KEYCLOAK_CLIENT_ID=sat_client
+      # Memory optimization for ML workloads
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - OPENBLAS_NUM_THREADS=4
+      - NUMEXPR_NUM_THREADS=4
+      - VECLIB_MAXIMUM_THREADS=4
+      - NUMBA_NUM_THREADS=4
+      # CUDA memory management
+      - CUDA_LAUNCH_BLOCKING=1
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      # Shared memory optimization
+      - SHM_SIZE=8g
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Shared volume mounted to multiple paths (same as your docker run command)
+      - D:\sat-annotator-storage:/app/storage
+      - D:\sat-annotator-storage:/app/backend/storage
+    # Increase shared memory for ML workloads
+    shm_size: 8g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - redis
+      - keycloak
+    restart: unless-stopped
+    networks:
+      - sat-annotator-network
+
+  explore-app:
+    image: sat-annotator-explore:latest
+    container_name: sat-annotator-explore
+    ports:
+      - "7080:7080"
+    environment:
+      - API_HOST=backend
+      - API_PORT=9000
+      - EXPLORE_APP_PORT=7080
+      - FRONTEND_PORT=5173
+      - INFER_SERVICE_URL=http://127.0.0.1:8105
+      - REDIS_URL=redis://redis:6379/0
+      - KEYCLOAK_URL=http://192.168.1.103:8080
+      - KEYCLOAK_REALM=SatRealm
+      - KEYCLOAK_CLIENT_ID=sat_client
+      - DOCKER_CONTAINER=true
+    volumes:
+      # Shared volume mounted to multiple paths (same as your docker run command)
+      - D:\sat-annotator-storage:/app/storage
+      - D:\sat-annotator-storage:/app/explore_app/storage
+      # Mount watch directory for COG watcher
+      - D:\sat-annotator-storage\watch:/app/storage/watch
+      # Mount logs directory for COG watcher logs
+      - D:\sat-annotator-storage\logs:/app/storage/logs
+    depends_on:
+      - redis
+      - keycloak
+      - backend
+    restart: unless-stopped
+    networks:
+      - sat-annotator-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: sat-annotator-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - sat-annotator-network
+
+  frontend:
+    image: sat-annotator-frontend:latest
+    container_name: sat-annotator-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - API_BASE_URL=http://192.168.1.103:9000
+      - EXPLORE_APP_BASE_URL=http://192.168.1.103:7080
+      - KEYCLOAK_URL=http://192.168.1.103:8080
+      - KEYCLOAK_REALM=SatRealm
+      - KEYCLOAK_CLIENT_ID=sat_client
+      - TILESERVER_PORT=9080
+      - FRONTEND_PORT=5173
+    depends_on:
+      - backend
+      - explore-app
+      - keycloak
+    restart: unless-stopped
+    networks:
+      - sat-annotator-network
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: sat-annotator-keycloak
+    ports:
+      - "192.168.1.103:8080:8080"
+    environment:
+      - KC_BOOTSTRAP_ADMIN_USERNAME=admin
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=admin
+      - KC_SPI_THEME_STATIC_MAX_AGE=-1
+      - KC_SPI_THEME_CACHE_THEMES=false
+      - KC_SPI_THEME_CACHE_TEMPLATES=false
+    command: start-dev --spi-theme-static-max-age=-1 --spi-theme-cache-themes=false --spi-theme-cache-templates=false
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - sat-annotator-network
+
+  tileserver:
+    image: klokantech/tileserver-gl:latest
+    container_name: sat-annotator-tileserver
+    ports:
+      - "9080:80"
+    volumes:
+      - D:/sat-annotator:/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - sat-annotator-network
+
+networks:
+  sat-annotator-network:
+    driver: bridge
+
+# Using host directories instead of named volumes for better storage control
+

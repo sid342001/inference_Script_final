@@ -1,0 +1,158 @@
+# Satellite Inference Pipeline Dockerfile
+# Multi-stage build for efficient image size
+# Using Ubuntu base image (PyTorch includes CUDA binaries, nvidia-container-toolkit provides runtime)
+# Clean OS without stub libraries - nvidia-container-toolkit injects real drivers
+FROM ubuntu:20.04
+
+# Set working directory
+WORKDIR /app
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    QT_QPA_PLATFORM=offscreen \
+    PROJ_LIB=/opt/conda/share/proj \
+    GDAL_DATA=/opt/conda/share/gdal
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    gcc \
+    g++ \
+    libffi-dev \
+    libssl-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libgl1-mesa-glx \
+    libxrender1 \
+    libgtk-3-0 \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && \
+    bash miniconda.sh -b -p /opt/conda && \
+    rm miniconda.sh && \
+    /opt/conda/bin/conda clean -afy
+
+# Add conda to PATH
+ENV PATH="/opt/conda/bin:$PATH"
+
+# Initialize conda
+RUN echo 'eval "$(/opt/conda/bin/conda shell.bash hook)"' >> ~/.bashrc
+RUN /opt/conda/bin/conda init bash
+
+# Accept conda TOS
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+# Configure conda channels (pytorch for PyTorch, conda-forge for geospatial)
+RUN conda config --set channel_priority strict && \
+    conda config --add channels conda-forge && \
+    conda config --set show_channel_urls true && \
+    conda config --set always_yes true
+
+# Create conda environment with Python 3.10
+RUN conda create -n inference python=3.10.8 -y
+
+# Install GDAL and geospatial packages via conda (critical for satellite imagery)
+# libgdal-jp2openjpeg provides JP2/JPEG2000 format support (required for .jp2 files)
+# This plugin enables GDAL to read and process JPEG2000 satellite imagery formats
+RUN conda run -n inference conda install -c conda-forge \
+    gdal \
+    libgdal-jp2openjpeg \
+    rasterio \
+    shapely \
+    pyproj \
+    -y
+
+# Upgrade pip
+RUN conda run -n inference pip install --no-cache-dir --upgrade pip
+
+# Install image processing dependencies first (PyTorch may depend on these)
+RUN conda run -n inference pip install --no-cache-dir \
+    Pillow==11.1.0 \
+    numpy==2.0.1
+
+# Install PyTorch with CUDA 12.1 via pip (matching user's conda environment installation method)
+RUN conda run -n inference pip install --no-cache-dir \
+    torch==2.5.1 \
+    torchvision==0.20.1 \
+    torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Install remaining core Python dependencies
+RUN conda run -n inference pip install --no-cache-dir \
+    pyyaml==6.0.2 \
+    pynvml==11.5.0 \
+    tqdm==4.67.1
+
+    
+# Install optional dependencies (watchdog for file monitoring)
+RUN conda run -n inference pip install --no-cache-dir \
+    watchdog==6.0.0 || echo "Warning: watchdog installation failed, will use polling fallback"
+
+# Copy custom Ultralytics package
+COPY Ultralytics/ultralytics2 /app/Ultralytics/ultralytics2
+
+# Install custom ultralytics in editable mode
+RUN conda run -n inference pip install --no-cache-dir -e /app/Ultralytics/ultralytics2
+
+# Copy application code maintaining package structure
+# Create inference_Script package directory
+RUN mkdir -p /app/inference_Script
+
+# Copy run_pipeline.py to app root (entrypoint script runs it from here)
+COPY run_pipeline.py /app/
+
+# Copy all other Python files to the package directory
+# Exclude run_pipeline.py and dashboard_server.py (they go to root)
+COPY config_loader.py orchestrator.py inference_runner.py tiler.py watcher.py \
+     job_queue.py health_monitor.py gpu_balancer.py logging_setup.py manifest.py \
+     /app/inference_Script/
+
+# Copy dashboard_server.py to app root (can be run independently)
+COPY dashboard_server.py /app/
+
+# Copy dashboard and scripts to app root
+COPY dashboard.html /app/
+COPY start_dashboard.sh /app/
+COPY start_dashboard.bat /app/
+
+# Copy __init__.py to package directory (required for package imports)
+COPY __init__.py /app/inference_Script/
+
+# Copy default config template (shipped with image)
+# User can mount their own config/pipeline.yaml to override
+COPY config/pipeline.yaml.docker /app/config/pipeline.yaml.default
+
+# Create necessary directories (matching .gitkeep structure)
+RUN mkdir -p /app/artifacts/{success,failure,combined,tmp,health,logs} && \
+    mkdir -p /app/state/{quarantine,tile_cache} && \
+    mkdir -p /app/logs/pipeline/images && \
+    mkdir -p /app/data/incoming && \
+    mkdir -p /app/models
+
+# Set up scripts
+RUN chmod +x /app/start_dashboard.sh || true
+
+# Expose dashboard port (default from config: 8092)
+EXPOSE 8092
+
+# Health check - check if pipeline process is running
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8092/api/status || exit 1
+
+# Start command using conda run (matching working Dockerfile approach)
+# Config priority: /app/config/pipeline.yaml (user-mounted) or /app/config/pipeline.yaml.default (default)
+CMD ["sh", "-c", "/opt/conda/bin/conda run --no-capture-output -n inference python /app/run_pipeline.py --config /app/config/pipeline.yaml"]
+

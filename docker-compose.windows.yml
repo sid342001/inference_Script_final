@@ -1,0 +1,100 @@
+version: '3.8'
+
+# Docker Compose for Windows (Docker Desktop with WSL2 backend)
+# 
+# IMPORTANT: Docker Compose on Windows may not support GPU passthrough properly.
+# For reliable GPU support on Windows, use docker-run-gpu.bat instead.
+#
+# Usage: 
+#   Option 1: docker-compose -f docker-compose.windows.yml up -d (may not have GPU)
+#   Option 2: Use docker-run-gpu.bat for GPU support
+
+services:
+  inference-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: satellite-inference-pipeline:latest
+    container_name: inference-pipeline
+    restart: unless-stopped
+    
+    # Environment variables
+    # Note: Do NOT set CUDA_VISIBLE_DEVICES or NVIDIA_VISIBLE_DEVICES
+    # nvidia-container-toolkit handles this automatically when using deploy.resources.reservations.devices
+    environment:
+      - PYTHONUNBUFFERED=1
+      - USE_WATCHDOG_IN_DOCKER=1
+    
+    # GPU support for Windows Docker Desktop (WSL2 backend)
+    # Note: Docker Compose GPU support on Windows is limited/unreliable
+    # For reliable GPU support, use docker-run-gpu.bat instead
+    # The pipeline will automatically fall back to CPU if GPU is not available
+    
+    # Volume mounts (all read-write for full user access)
+    # Use Windows paths or relative paths
+    volumes:
+      # Mount input directory (watch for new images)
+      - D:\aks\sat-annotator-main\inference_Script\docker_data\scheduled:/app/data/incoming
+      
+      # Mount output directories (persist results)
+      - D:\aks\sat-annotator-main\inference_Script\docker_data\artifacts:/app/artifacts
+      
+      # Mount state directory (persist queue and cache)
+      - D:\aks\sat-annotator-main\inference_Script\docker_data\state:/app/state
+      
+      # Mount logs directory
+      - D:\aks\sat-annotator-main\inference_Script\docker_data\logs:/app/logs
+      
+      # Mount models directory
+      - D:\aks\sat-annotator-main\inference_Script\docker_data\models:/app/models
+      
+      # Mount config directory
+      - D:\aks\sat-annotator-main\inference_Script\docker_data\config:/app/config
+      
+    
+    # Ports
+    ports:
+      - "8092:8092"  # Dashboard port
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits and GPU support
+    # Note: GPU support in docker-compose on Windows may not work reliably
+    # For guaranteed GPU support, use docker-run-gpu.bat instead
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G
+        reservations:
+          memory: 16G
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Optional: Separate dashboard service
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: satellite-inference-pipeline:latest
+    container_name: inference-dashboard
+    entrypoint: ["sh", "-c"]
+    command: ["/opt/conda/bin/conda run --no-capture-output -n inference python /app/dashboard_server.py --config /app/config/pipeline.yaml"]
+    ports:
+      - "8093:8093"  # Different port to avoid conflict
+    volumes:
+      - D:\aks\sat-annotator-main\inference_Script\docker_data\artifacts:/app/artifacts
+      - D:\aks\sat-annotator-main\inference_Script\docker_data\config:/app/config
+    depends_on:
+      - inference-pipeline
+    # profiles:
+    #   - dashboard-only
+

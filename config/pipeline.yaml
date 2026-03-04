@@ -1,0 +1,164 @@
+# Satellite Inference Pipeline Configuration
+# Copy this file to pipeline.yaml and update the paths
+
+# Directory to watch for new satellite images
+watcher:
+  input_dir: "D:/aks/sat-annotator-main/inference_Script/data/incoming"  # Create this directory and place images here
+  recursive: true              # Watch subdirectories
+  include_extensions: [".tif", ".tiff", ".jp2", ".img"]  # Supported formats
+  settle_time_seconds: 10      # Wait for file to finish copying
+  poll_interval_seconds: 30    # Polling interval (if watchdog not available)
+  max_inflight_jobs: 32        # Max jobs in queue
+  
+  # Folder Identity Filtering (Optional)
+  # Only process images from specified folders. Images directly in input_dir get identity "root".
+  # If not specified or empty, all folders are processed.
+  # Supports regex patterns for flexible matching (e.g., ["project_.*", "test_.*"])
+  folder_identities: ["carto", "maxar", "qgis", "SAR","jp2"]  # List of folder names or regex patterns
+  
+  # Optional: Custom regex to extract folder identity from file path
+  # Example: "incoming/([^/]+)/.*" extracts the first folder name after 'incoming/'
+  # If not specified, uses immediate parent folder name relative to input_dir
+  # folder_identity_regex: null
+
+# Job queue configuration
+queue:
+  persistence_path: "D:/aks/sat-annotator-main/inference_Script/state/queue.json"  # Queue state file (persists across restarts)
+  max_retries: 3               # Retry failed jobs 3 times before quarantining
+  retry_backoff_seconds: 60     # Wait 60s between retries (gives time for transient issues to resolve)
+  quarantine_dir: "D:/aks/sat-annotator-main/inference_Script/state/quarantine"  # Permanently failed jobs go here
+  # Insight: Jobs are retried automatically for transient errors (file locks, network issues, etc.)
+
+# Worker configuration
+workers:
+  max_concurrent_jobs: 8      # Process 4 images simultaneously (adjust based on GPU memory)
+  batch_size: 12                # Process 4 tiles per batch (adjust based on GPU memory)
+  tile_cache_dir: "D:/aks/sat-annotator-main/inference_Script/state/tile_cache"  # Cache for processed tiles (speeds up reprocessing)
+  hybrid_mode: true            # Enable hybrid mode: Load all models on all GPUs for dynamic assignment
+  gpu_balancing_strategy: "least_busy"  # Options: "least_busy" (recommended), "round_robin", "least_queued"
+  job_timeout_seconds: 3600   # Maximum time per job (1 hour) - prevents infinite hangs
+  # Insight: Hybrid mode provides better GPU utilization in multi-GPU setups by dynamically assigning jobs to least busy GPU
+
+# Tiling configuration
+# This is the GLOBAL default tiling configuration.
+# Individual models can override these settings using per-model 'tile:' configuration.
+# Use per-model tiling when models were trained on different tile sizes.
+tiling:
+  tile_size: 512              # Size of each tile in pixels (width and height)
+  overlap: 256                  # Overlap between tiles (prevents edge artifacts and ensures boundary detection)
+  normalization_mode: "auto"   # Auto-normalize pixel values
+  allow_resample: true          # Allow resampling if image doesn't match tile size
+  iou_threshold: 0.8            # IoU threshold for cross-tile NMS (0.0-1.0) - removes duplicate detections
+  ioma_threshold: 0.75         # IoMA threshold for cross-tile NMS (0.0-1.0) - additional deduplication
+  # Insight: Overlap should typically be 25-50% of tile_size. Higher overlap = better edge detection but slower processing.
+
+# GPU configuration
+# List all available GPUs
+gpus:
+  - id: "gpu0"
+    device: "cuda:0"
+  # Uncomment if you have multiple GPUs:
+  # - id: "gpu1"
+  #   device: "cuda:1"
+
+# Model configuration
+# Add your YOLO models here. Each model can have its own folder filtering and tiling settings.
+models:
+  - name: "Yolo_plane_x"
+    weights_path: "D:/aks/sat-annotator-main/inference_Script/models/Yolo_plane_x.pt"  # UPDATE THIS PATH!
+    type: "yolo"                          # "yolo" or "yolo_obb"
+    device: "cuda:0"                       # Which GPU to use (ignored in hybrid_mode)
+    confidence_threshold: 0.5              # Minimum confidence score (0.0-1.0)
+    
+    # Model-Specific Folder Filtering (Optional)
+    # Controls which folder identities this model processes. Works in conjunction with watcher.folder_identities.
+    # If watcher allows an image but model doesn't, the image is processed by other applicable models only.
+    all_folders: false                    # If true, this model processes ALL folders (ignores folder_identities)
+    folder_identities: ["qgis", "SAR","jp2"]     # Only process images from these folders (supports regex patterns)
+    # Insight: Use folder filtering to apply specialized models to specific image sources
+    
+    # Per-Model Tiling Configuration (Optional - overrides global tiling settings)
+    # CRITICAL: Tile size MUST match the tile size used during model training for optimal performance!
+    # Use this when models were trained on different tile sizes (e.g., one on 256px, another on 1024px)
+    tile:
+      tile_size: 256                    # Model-specific tile size 
+      overlap: 128                      # Model-specific overlap (typically 25-50% of tile_size)
+      normalization_mode: "auto"        # Model-specific normalization
+      allow_resample: true              # Allow resampling if needed
+      iou_threshold: 0.8                 # IoU threshold for cross-tile NMS (removes duplicate detections)
+      ioma_threshold: 0.75              # IoMA threshold for cross-tile NMS (additional deduplication)
+    
+    
+    outputs:
+      write_tile_previews: false           # Save tile preview images (useful for debugging)
+      summary_csv: true                    # Generate CSV summaries with detection details
+
+  # Example second model (uncomment and configure):
+  - name: "yolo11n-obb"
+    weights_path: "D:/aks/sat-annotator-main/inference_Script/models/yolo11n-obb.pt"   # UPDATE THIS PATH!
+    type: "yolo_obb"                      # Oriented bounding boxes (rotated boxes)
+    device: "cuda:0"                      # Which GPU to use (ignored in hybrid_mode)
+    confidence_threshold: 0.6
+    
+    # Model-Specific Folder Filtering
+    all_folders: false                    # If true, process all folders
+    folder_identities: ["carto", "maxar","jp2"]  # Only process images from these folders
+    
+    # Per-Model Tiling Configuration
+    # This model was trained on 1024px tiles, so we override global 512px setting
+    tile:
+      tile_size: 1024                   # Different tile size (MUST match training)
+      overlap: 512                      # Different overlap (50% of tile_size)
+      normalization_mode: "auto"
+      allow_resample: true
+      iou_threshold: 0.75                # Different NMS thresholds (tuned for this model)
+      ioma_threshold: 0.7
+    
+    
+    outputs:
+      write_tile_previews: false
+      summary_csv: true
+
+# Artifacts (output) configuration
+artifacts:
+  # Main output directories - organized by folder identity
+  # Structure: success_dir/{folder_identity}/{image_name}_{job_id}/...
+  success_dir: "D:/aks/sat-annotator-main/inference_Script/artifacts/success"      # Successful job outputs
+  failure_dir: "D:/aks/sat-annotator-main/inference_Script/artifacts/failure"      # Failed job outputs
+  # Insight: Outputs are organized by folder identity (e.g., success/carto/, success/qgis/) for easy management
+  
+  # Deprecated directories (kept for backward compatibility)
+  combined_dir: "D:/aks/sat-annotator-main/inference_Script/artifacts/combined"    # DEPRECATED: Not used
+  per_image_log_dir: "D:/aks/sat-annotator-main/inference_Script/artifacts/logs"   # DEPRECATED: Not used
+  
+  temp_dir: "D:/aks/sat-annotator-main/inference_Script/artifacts/tmp"              # Temporary files during processing
+  
+  # Centralized output directories - flat structure for easy access
+  combined_inferences_dir: "D:/aks/sat-annotator-main/inference_Script/artifacts/combined_inferences"  # All combined GeoJSON files (one per image)
+  model_outputs_dir: "D:/aks/sat-annotator-main/inference_Script/artifacts/model_outputs"  # All per-model outputs (GeoJSONs and CSVs)
+  # Insight: Centralized dirs provide a single location to find all outputs, regardless of folder identity
+  
+  # Daily logs contain MAIN PIPELINE LOGS (watcher, workers, orchestrator activity)
+  # Individual image logs are in success_dir/{folder_identity}/{image_name}/ or failure_dir/
+  daily_logs_dir: "D:/aks/sat-annotator-main/inference_Script/artifacts/daily_logs"  # Daily logs: YYYY-MM-DD/pipeline.log
+  # Insight: Daily logs show the entire pipeline activity, not individual image processing details
+  
+  manifest_format: "json"                # Manifest format (currently only "json" supported)
+  preview_format: "png"                  # Preview image format ("png", "jpg", "jpeg")
+
+# Logging configuration
+logging:
+  level: "INFO"                          # Log level: DEBUG, INFO, WARNING, ERROR
+  log_dir: "D:/aks/sat-annotator-main/inference_Script/logs/pipeline"               # Main log directory
+  per_image_level: "DEBUG"                # Per-image log level
+
+# Health monitoring
+health:
+  heartbeat_path: "D:/aks/sat-annotator-main/inference_Script/artifacts/health/status.json"  # Health status file
+  interval_seconds: 15                    # Update every 15 seconds
+
+# Dashboard configuration
+dashboard:
+  enabled: true                            # Enable/disable dashboard
+  host: "localhost"                        # Host to bind dashboard server (use "0.0.0.0" for all interfaces)
+  port: 8092                               # Port for dashboard server
