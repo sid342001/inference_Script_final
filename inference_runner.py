@@ -33,6 +33,7 @@ from .config_loader import ModelConfig, PipelineConfig, TilingConfig
 from .gpu_balancer import GPULoadBalancer
 from .logging_setup import create_image_logger, get_logger, log_status_snapshot
 from .manifest import ManifestEntry, ManifestWriter
+from .roi_filter import ROIFilter
 from .tiler import RasterTiler, Tile
 
 logger = get_logger("inference_runner")
@@ -1168,12 +1169,113 @@ class InferenceRunner:
                 image_logger.error("    - folder_identities containing '%s' (case-insensitive)", folder_identity)
                 raise ValueError(f"No models configured for folder identity: {folder_identity}")
             
+            # ========================================================================
+            # STEP 3.5: ROI Filtering (if configured)
+            # ========================================================================
+            image_logger.info("")
+            image_logger.info("STEP 3.5: ROI FILTERING")
+            image_logger.info("-" * 80)
+            
+            roi_filter = ROIFilter()
+            per_model_pixel_bounds: Dict[str, Optional[Tuple[int, int, int, int]]] = {}
+            models_to_skip: List[str] = []
+            
+            # Get image bounds once (reuse tiler.dataset)
+            image_bounds = roi_filter.get_image_geographic_bounds(tiler.dataset)
+            if not image_bounds:
+                image_logger.warning("  Image has no geographic bounds (no geotransform/projection)")
+                image_logger.warning("  ROI filtering cannot be applied - processing full image for all models")
+                # Set all models to process full image
+                for model_name in applicable_models.keys():
+                    per_model_pixel_bounds[model_name] = None
+            else:
+                image_logger.info("  Image geographic bounds extracted successfully")
+                
+                # Get image CRS for ROI reprojection
+                image_crs = roi_filter.get_image_crs(tiler.dataset)
+                if image_crs:
+                    image_logger.info("  Image CRS: %s", image_crs.to_string())
+                else:
+                    image_logger.warning("  Image CRS unknown - ROI reprojection may fail")
+                
+                # Check ROI for each model
+                for model_name, model_config in applicable_models.items():
+                    if model_config.roi_geojson_path:
+                        try:
+                            image_logger.info("  Checking ROI for model '%s'...", model_name)
+                            image_logger.info("    ROI GeoJSON: %s", model_config.roi_geojson_path)
+                            
+                            # Load ROI polygons
+                            roi_polygons = roi_filter.load_roi_geojson(model_config.roi_geojson_path)
+                            image_logger.info("    Loaded %d ROI polygon(s)", len(roi_polygons))
+                            
+                            # Ensure ROI is in same CRS as image
+                            # Assume ROI is in WGS84 (EPSG:4326) if not specified
+                            roi_crs = CRS.from_epsg(4326)  # Default assumption
+                            roi_polygons, effective_crs = roi_filter.ensure_same_crs(
+                                roi_polygons, roi_crs, image_crs
+                            )
+                            
+                            # Compute intersection
+                            intersection = roi_filter.compute_intersection(image_bounds, roi_polygons)
+                            
+                            if not intersection:
+                                image_logger.info("    ✗ Image does not intersect ROI - skipping model '%s'", model_name)
+                                models_to_skip.append(model_name)
+                                per_model_pixel_bounds[model_name] = None
+                                continue
+                            
+                            # Calculate pixel bounds from intersection
+                            pixel_bounds = roi_filter.geographic_to_pixel_bounds(intersection, tiler.dataset)
+                            per_model_pixel_bounds[model_name] = pixel_bounds
+                            
+                            xmin, ymin, xmax, ymax = pixel_bounds
+                            cropped_width = xmax - xmin + 1
+                            cropped_height = ymax - ymin + 1
+                            original_width = tiler.dataset.RasterXSize
+                            original_height = tiler.dataset.RasterYSize
+                            crop_ratio = (cropped_width * cropped_height) / (original_width * original_height)
+                            
+                            image_logger.info("    ✓ Image intersects ROI")
+                            image_logger.info("    Cropped region: (%d, %d) to (%d, %d)", xmin, ymin, xmax, ymax)
+                            image_logger.info("    Cropped size: %d x %d pixels (%.1f%% of original)", 
+                                            cropped_width, cropped_height, crop_ratio * 100)
+                            
+                        except Exception as e:
+                            image_logger.warning("    ✗ ROI filtering failed for model '%s': %s", model_name, e)
+                            image_logger.warning("    Falling back to processing full image")
+                            per_model_pixel_bounds[model_name] = None
+                    else:
+                        # No ROI configured - process full image
+                        image_logger.debug("    Model '%s': No ROI configured - processing full image", model_name)
+                        per_model_pixel_bounds[model_name] = None
+            
+            # Remove models that don't intersect ROI
+            if models_to_skip:
+                image_logger.info("")
+                image_logger.info("  Removing %d model(s) that don't intersect ROI: %s", 
+                               len(models_to_skip), ", ".join(models_to_skip))
+                for model_name in models_to_skip:
+                    applicable_models.pop(model_name, None)
+                    per_model_pixel_bounds.pop(model_name, None)
+            
+            if not applicable_models:
+                error_msg = "No models remain after ROI filtering. All models were skipped."
+                image_logger.error("✗ %s", error_msg)
+                raise ValueError(error_msg)
+            
             model_names = list(applicable_models.keys())
-            image_logger.info("✓ Selected %d model(s) for processing:", len(applicable_models))
+            image_logger.info("")
+            image_logger.info("✓ Selected %d model(s) for processing after ROI filtering:", len(applicable_models))
             for model_name in model_names:
                 model_config = applicable_models[model_name]
-                image_logger.info("  - %s (type: %s, confidence: %.2f)", 
-                                model_name, model_config.type, model_config.confidence_threshold)
+                pixel_bounds = per_model_pixel_bounds.get(model_name)
+                if pixel_bounds:
+                    image_logger.info("  - %s (type: %s, confidence: %.2f, ROI cropped)", 
+                                    model_name, model_config.type, model_config.confidence_threshold)
+                else:
+                    image_logger.info("  - %s (type: %s, confidence: %.2f, full image)", 
+                                    model_name, model_config.type, model_config.confidence_threshold)
             
             preview_tracker: Dict[str, set] = {name: set() for name in model_names}
 
@@ -1205,9 +1307,27 @@ class InferenceRunner:
                 first_model = applicable_models[models_in_group[0]]
                 model_tile_config = first_model.tile or self.config.tiling
                 
-                # Create shared tiler for this tile config
-                shared_tiler = RasterTiler(image_path, model_tile_config)
-                tile_config_to_tiler[tile_config_key] = shared_tiler
+                # Check if all models in this group have the same pixel_bounds
+                # If they do, we can share the tiler; otherwise, create separate tilers
+                group_pixel_bounds = per_model_pixel_bounds.get(models_in_group[0])
+                all_same_bounds = all(
+                    per_model_pixel_bounds.get(m) == group_pixel_bounds 
+                    for m in models_in_group
+                )
+                
+                if all_same_bounds and len(models_in_group) > 1:
+                    # All models share same ROI bounds - create shared tiler
+                    shared_tiler = RasterTiler(image_path, model_tile_config, pixel_bounds=group_pixel_bounds)
+                    tile_config_to_tiler[tile_config_key] = shared_tiler
+                else:
+                    # Models have different ROI bounds or only one model - create separate tilers
+                    for model_name in models_in_group:
+                        model_pixel_bounds = per_model_pixel_bounds.get(model_name)
+                        model_tiler = RasterTiler(image_path, model_tile_config, pixel_bounds=model_pixel_bounds)
+                        # Store in per_model_tilers directly (not in shared dict)
+                        per_model_tilers[model_name] = model_tiler
+                    # Don't create shared tiler for this group
+                    continue
                 
                 # Calculate tile grid dimensions (using shared tiler's dimensions)
                 tiles_per_row = (shared_tiler.width + model_tile_config.tile_size - model_tile_config.overlap - 1) // (model_tile_config.tile_size - model_tile_config.overlap)
@@ -1233,9 +1353,11 @@ class InferenceRunner:
                 image_logger.info("    IoU Threshold: %.2f", model_tile_config.iou_threshold)
                 image_logger.info("    IoMA Threshold: %.2f", model_tile_config.ioma_threshold)
                 
-                # Assign shared tiler to all models in this group
-                for model_name in models_in_group:
-                    per_model_tilers[model_name] = shared_tiler
+                # Assign shared tiler to all models in this group (only if shared tiler was created)
+                if tile_config_key in tile_config_to_tiler:
+                    shared_tiler = tile_config_to_tiler[tile_config_key]
+                    for model_name in models_in_group:
+                        per_model_tilers[model_name] = shared_tiler
             
             # Log memory savings summary
             total_models = len(applicable_models)

@@ -203,6 +203,7 @@ class ModelConfig:
     outputs: ModelOutputConfig
     folder_identities: Optional[List[str]]
     all_folders: bool
+    roi_geojson_path: Optional[Path] = None
 
     @classmethod
     def from_dict(cls, data: Dict, base: Path, default_tile: TilingConfig) -> "ModelConfig":
@@ -236,6 +237,14 @@ class ModelConfig:
         if folder_identities is not None:
             folder_identities = [str(f) for f in folder_identities]
         all_folders = bool(data.get("all_folders", False))
+        
+        # ROI GeoJSON path (optional)
+        roi_geojson_path = None
+        if "roi_geojson_path" in data and data["roi_geojson_path"]:
+            roi_path = (base / data["roi_geojson_path"]).resolve()
+            if not roi_path.exists():
+                raise ConfigError(f"ROI GeoJSON file not found for model '{data['name']}': {roi_path}")
+            roi_geojson_path = roi_path
 
         return cls(
             name=data["name"],
@@ -248,6 +257,7 @@ class ModelConfig:
             outputs=outputs,
             folder_identities=folder_identities,
             all_folders=all_folders,
+            roi_geojson_path=roi_geojson_path,
         )
 
 
@@ -529,6 +539,12 @@ def _log_configuration_summary(config: PipelineConfig, config_path: Path) -> Non
             logger.info("  │    IoMA Threshold: %.2f", model_cfg.tile.ioma_threshold)
         else:
             logger.info("  │  Tiling: Using global configuration")
+        
+        # ROI configuration
+        if model_cfg.roi_geojson_path:
+            logger.info("  │  ROI: Configured from %s", model_cfg.roi_geojson_path)
+        else:
+            logger.info("  │  ROI: None (processes full image)")
         
         # Output settings
         logger.info("  │  Outputs:")

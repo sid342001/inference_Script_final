@@ -40,12 +40,49 @@ class Tile:
 
 
 class RasterTiler:
-    def __init__(self, image_path: Path, config: TilingConfig):
+    def __init__(self, image_path: Path, config: TilingConfig, pixel_bounds: Optional[Tuple[int, int, int, int]] = None):
+        """
+        Initialize RasterTiler.
+        
+        Args:
+            image_path: Path to image file
+            config: Tiling configuration
+            pixel_bounds: Optional (xmin, ymin, xmax, ymax) in original image coordinates.
+                        If provided, only tiles within these bounds will be generated.
+                        Tile offsets will still reference original image coordinates.
+        """
         self.image_path = Path(image_path)
         self.config = config
         self.dataset = self._open_dataset()
-        self.width = self.dataset.RasterXSize
-        self.height = self.dataset.RasterYSize
+        
+        # Store original dimensions
+        self.original_width = self.dataset.RasterXSize
+        self.original_height = self.dataset.RasterYSize
+        
+        # Handle pixel bounds (ROI cropping)
+        self.pixel_bounds = pixel_bounds
+        if pixel_bounds:
+            xmin, ymin, xmax, ymax = pixel_bounds
+            # Validate bounds
+            if xmin < 0 or ymin < 0 or xmax >= self.original_width or ymax >= self.original_height:
+                raise ValueError(f"Pixel bounds {pixel_bounds} are outside image dimensions ({self.original_width}x{self.original_height})")
+            if xmin >= xmax or ymin >= ymax:
+                raise ValueError(f"Invalid pixel bounds: {pixel_bounds}")
+            
+            # Set effective dimensions to cropped region
+            self.width = xmax - xmin + 1
+            self.height = ymax - ymin + 1
+            self.crop_offset_x = xmin
+            self.crop_offset_y = ymin
+            logger.info("ROI cropping enabled: processing region (%d, %d) to (%d, %d) = %dx%d pixels (original: %dx%d)",
+                      xmin, ymin, xmax, ymax, self.width, self.height, self.original_width, self.original_height)
+        else:
+            # No cropping - use full image
+            self.width = self.original_width
+            self.height = self.original_height
+            self.crop_offset_x = 0
+            self.crop_offset_y = 0
+        
         self.band_count = min(self.dataset.RasterCount, 4)
         self._validate()
         # Compute global min/max for normalization (without loading full image)
@@ -197,15 +234,34 @@ class RasterTiler:
 
         for row in range(h_iter):
             for col in range(w_iter):
-                start_y = row * stride
-                start_x = col * stride
+                # Calculate tile position in cropped coordinate space
+                start_y_cropped = row * stride
+                start_x_cropped = col * stride
                 
-                # Calculate actual read window (may extend beyond image bounds on right/bottom)
-                # Tiles start from (0,0) so they can only extend beyond right/bottom edges
+                # Convert to original image coordinates (for reading from dataset)
+                start_y = start_y_cropped + self.crop_offset_y
+                start_x = start_x_cropped + self.crop_offset_x
+                
+                # Calculate actual read window (may extend beyond cropped bounds on right/bottom)
                 read_x = start_x
                 read_y = start_y
                 read_width = cfg_tile_size
                 read_height = cfg_tile_size
+                
+                # Clamp read window to cropped region bounds
+                max_read_x = self.crop_offset_x + self.width
+                max_read_y = self.crop_offset_y + self.height
+                
+                if read_x + read_width > max_read_x:
+                    read_width = max_read_x - read_x
+                if read_y + read_height > max_read_y:
+                    read_height = max_read_y - read_y
+                
+                # Skip if tile is completely outside cropped region
+                if read_x < self.crop_offset_x or read_y < self.crop_offset_y:
+                    continue
+                if read_width <= 0 or read_height <= 0:
+                    continue
                 
                 # Calculate padding needed if tile extends beyond image bounds
                 pad_top = 0
@@ -258,12 +314,13 @@ class RasterTiler:
                 # Normalize using global min/max
                 tile_array = self._normalize_tile(tile_array)
                 
-                # Calculate global bounds (same as before)
+                # Calculate global bounds in original image coordinates
+                # These offsets reference the original image, not the cropped region
                 global_bounds = (
-                    start_y,
-                    start_x,
-                    min(start_y + cfg_tile_size, self.height),
-                    min(start_x + cfg_tile_size, self.width),
+                    start_y,  # ymin in original image
+                    start_x,  # xmin in original image
+                    min(start_y + cfg_tile_size, self.crop_offset_y + self.height),  # ymax in original image
+                    min(start_x + cfg_tile_size, self.crop_offset_x + self.width),   # xmax in original image
                 )
                 
                 metadata = TileMetadata(
@@ -271,9 +328,9 @@ class RasterTiler:
                     col=col,
                     width=cfg_tile_size,
                     height=cfg_tile_size,
-                    offset_x=start_x,
-                    offset_y=start_y,
-                    global_bounds=global_bounds,
+                    offset_x=start_x,  # In original image coordinates
+                    offset_y=start_y,  # In original image coordinates
+                    global_bounds=global_bounds,  # In original image coordinates
                 )
                 
                 yield Tile(metadata=metadata, array=tile_array)
