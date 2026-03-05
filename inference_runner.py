@@ -1265,8 +1265,11 @@ class InferenceRunner:
                 raise ValueError(error_msg)
             
             model_names = list(applicable_models.keys())
+            roi_cropped_count = sum(1 for mn in model_names if per_model_pixel_bounds.get(mn))
+            full_image_count = len(model_names) - roi_cropped_count
             image_logger.info("")
             image_logger.info("✓ Selected %d model(s) for processing after ROI filtering:", len(applicable_models))
+            image_logger.info("  ROI summary: %d model(s) with cropped region, %d with full image", roi_cropped_count, full_image_count)
             for model_name in model_names:
                 model_config = applicable_models[model_name]
                 pixel_bounds = per_model_pixel_bounds.get(model_name)

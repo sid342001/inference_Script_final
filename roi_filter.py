@@ -270,6 +270,7 @@ class ROIFilter:
         # Union all intersecting polygons into single region
         if len(intersecting_polygons) == 1:
             unioned = intersecting_polygons[0]
+            logger.debug("Single ROI polygon intersects image")
         else:
             logger.info("Unioning %d intersecting ROI regions into single processing area", len(intersecting_polygons))
             try:
