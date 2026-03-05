@@ -775,6 +775,21 @@ class InferenceRunner:
                         logger.warning("")
                 else:
                     logger.info("Successfully loaded %d model(s) on %d GPU(s)", len(self.models), len(available_gpus))
+                    # Log ROI summary for visibility at startup.
+                    # Use config.models (ModelConfig) instead of self.models to avoid
+                    # depending on internal ModelHandle structure.
+                    roi_enabled = [
+                        name for name, cfg in config.models.items()
+                        if getattr(cfg, "roi_geojson_path", None)
+                    ]
+                    roi_disabled = [
+                        name for name, cfg in config.models.items()
+                        if not getattr(cfg, "roi_geojson_path", None)
+                    ]
+                    if roi_enabled:
+                        logger.info("ROI enabled for models: %s", ", ".join(sorted(roi_enabled)))
+                    if roi_disabled:
+                        logger.info("ROI disabled (full image) for models: %s", ", ".join(sorted(roi_disabled)))
                     logger.info("")
             else:
                 logger.warning(

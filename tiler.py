@@ -263,22 +263,6 @@ class RasterTiler:
                 if read_width <= 0 or read_height <= 0:
                     continue
                 
-                # Calculate padding needed if tile extends beyond image bounds
-                pad_top = 0
-                pad_bottom = 0
-                pad_left = 0
-                pad_right = 0
-                
-                # Check if tile extends beyond bottom edge
-                if read_y + read_height > self.height:
-                    pad_bottom = (read_y + read_height) - self.height
-                    read_height = self.height - read_y
-                
-                # Check if tile extends beyond right edge
-                if read_x + read_width > self.width:
-                    pad_right = (read_x + read_width) - self.width
-                    read_width = self.width - read_x
-                
                 # Read tile window directly from file (windowed reading)
                 bands = []
                 for idx in range(1, self.band_count + 1):
@@ -297,13 +281,18 @@ class RasterTiler:
                         # Use same dtype as band would return (typically uint8, uint16, or float32)
                         band_data = np.zeros((max(0, read_height), max(0, read_width)), dtype=np.float32)
                     
-                    # Pad if necessary (edge tiles extending beyond image)
-                    if pad_top > 0 or pad_bottom > 0 or pad_left > 0 or pad_right > 0:
+                    # Ensure all tiles are exactly (cfg_tile_size x cfg_tile_size) by padding
+                    # right/bottom as needed. This is critical so that batched tensors
+                    # have consistent shapes for torch.stack.
+                    h, w = band_data.shape
+                    pad_bottom = max(0, cfg_tile_size - h)
+                    pad_right = max(0, cfg_tile_size - w)
+                    if pad_bottom or pad_right:
                         band_data = np.pad(
                             band_data,
-                            ((pad_top, pad_bottom), (pad_left, pad_right)),
+                            ((0, pad_bottom), (0, pad_right)),
                             mode="constant",
-                            constant_values=0
+                            constant_values=0,
                         )
                     
                     bands.append(band_data)

@@ -243,8 +243,16 @@ class ModelConfig:
         if "roi_geojson_path" in data and data["roi_geojson_path"]:
             roi_path = (base / data["roi_geojson_path"]).resolve()
             if not roi_path.exists():
-                raise ConfigError(f"ROI GeoJSON file not found for model '{data['name']}': {roi_path}")
-            roi_geojson_path = roi_path
+                # Fail-soft: log a warning and ignore ROI instead of failing the entire pipeline
+                logger.warning(
+                    "ROI GeoJSON file not found for model '%s': %s. "
+                    "This model will run on the full image (ROI disabled).",
+                    data["name"],
+                    roi_path,
+                )
+                roi_geojson_path = None
+            else:
+                roi_geojson_path = roi_path
 
         return cls(
             name=data["name"],

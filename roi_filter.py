@@ -74,52 +74,49 @@ class ROIFilter:
         
         polygons = []
         
-        # Handle different GeoJSON structures
-        if geojson_data.get("type") == "FeatureCollection":
-            features = geojson_data.get("features", [])
-            for feature in features:
-                geometry = feature.get("geometry")
-                if geometry and geometry.get("type") == "Polygon":
-                    coords = geometry.get("coordinates", [])
-                    if coords:
-                        try:
-                            # GeoJSON coordinates are [lon, lat] or [x, y]
-                            # Shapely expects (x, y) tuples
-                            polygon_coords = coords[0]  # First ring (exterior)
-                            shapely_polygon = Polygon(polygon_coords)
-                            if not shapely_polygon.is_valid:
-                                logger.warning("Invalid polygon in ROI, attempting to fix: %s", shapely_polygon)
-                                shapely_polygon = shapely_polygon.buffer(0)  # Fix self-intersections
-                            polygons.append(shapely_polygon)
-                        except Exception as e:
-                            logger.warning("Failed to create polygon from coordinates: %s", e)
-                            continue
-                            
-        elif geojson_data.get("type") == "Feature":
-            geometry = geojson_data.get("geometry")
-            if geometry and geometry.get("type") == "Polygon":
-                coords = geometry.get("coordinates", [])
-                if coords:
-                    try:
-                        polygon_coords = coords[0]
-                        shapely_polygon = Polygon(polygon_coords)
-                        if not shapely_polygon.is_valid:
-                            shapely_polygon = shapely_polygon.buffer(0)
-                        polygons.append(shapely_polygon)
-                    except Exception as e:
-                        logger.warning("Failed to create polygon from coordinates: %s", e)
-                        
-        elif geojson_data.get("type") == "Polygon":
-            coords = geojson_data.get("coordinates", [])
-            if coords:
-                try:
+        # Helper to normalize Polygon and MultiPolygon geometries into Polygon objects
+        def _add_geometry_as_polygons(geometry: dict) -> None:
+            if not geometry:
+                return
+            gtype = geometry.get("type")
+            coords = geometry.get("coordinates", [])
+            try:
+                if gtype == "Polygon":
+                    # coords: [ [ring0], [hole1], ... ]
+                    if not coords:
+                        return
                     polygon_coords = coords[0]
                     shapely_polygon = Polygon(polygon_coords)
                     if not shapely_polygon.is_valid:
+                        logger.warning("Invalid polygon in ROI, attempting to fix: %s", shapely_polygon)
                         shapely_polygon = shapely_polygon.buffer(0)
                     polygons.append(shapely_polygon)
-                except Exception as e:
-                    logger.warning("Failed to create polygon from coordinates: %s", e)
+                elif gtype == "MultiPolygon":
+                    # coords: [ [ [ring0], [hole1], ... ], ... ]
+                    for poly_coords in coords:
+                        if not poly_coords:
+                            continue
+                        polygon_coords = poly_coords[0]
+                        shapely_polygon = Polygon(polygon_coords)
+                        if not shapely_polygon.is_valid:
+                            logger.warning("Invalid polygon in ROI (from MultiPolygon), attempting to fix: %s", shapely_polygon)
+                            shapely_polygon = shapely_polygon.buffer(0)
+                        polygons.append(shapely_polygon)
+            except Exception as e:
+                logger.warning("Failed to create polygon from geometry %s: %s", gtype, e)
+
+        # Handle different GeoJSON structures (FeatureCollection, Feature, Geometry)
+        gtype = geojson_data.get("type")
+        if gtype == "FeatureCollection":
+            features = geojson_data.get("features", [])
+            for feature in features:
+                geometry = feature.get("geometry")
+                _add_geometry_as_polygons(geometry)
+        elif gtype == "Feature":
+            geometry = geojson_data.get("geometry")
+            _add_geometry_as_polygons(geometry)
+        elif gtype in ("Polygon", "MultiPolygon"):
+            _add_geometry_as_polygons(geojson_data)
         
         if not polygons:
             raise ValueError(f"No valid polygons found in ROI file {geojson_path}")

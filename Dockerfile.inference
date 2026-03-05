@@ -118,10 +118,12 @@ COPY run_pipeline.py /app/
 # Exclude run_pipeline.py and dashboard_server.py (they go to root)
 COPY config_loader.py orchestrator.py inference_runner.py tiler.py watcher.py \
      job_queue.py health_monitor.py gpu_balancer.py logging_setup.py manifest.py \
+     roi_filter.py \
      /app/inference_Script/
 
 # Copy dashboard_server.py to app root (can be run independently)
 COPY dashboard_server.py /app/
+
 
 # Copy dashboard and scripts to app root
 COPY dashboard.html /app/

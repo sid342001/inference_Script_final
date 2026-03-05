@@ -23,7 +23,6 @@ watcher:
   
   # Optional: Custom regex to extract folder identity from file path
   # Example: "incoming/([^/]+)/.*" extracts the first folder name after 'incoming/'
-  # folder_identity_regex: null
 
 # Job queue configuration
 # Mount state directory: -v /host/state:/app/state
@@ -75,6 +74,8 @@ models:
     type: "yolo"                                  # "yolo" or "yolo_obb"
     device: "cuda:0"                              # Which GPU (ignored in hybrid_mode)
     confidence_threshold: 0.5                     # Minimum confidence score (0.0-1.0)
+
+    #path to roi geojson file
     
     # Model-Specific Folder Filtering (Optional)
     # Controls which folder identities this model processes
@@ -103,7 +104,10 @@ models:
     weights_path: "/app/models/yolo11n-obb.pt"  # Docker path
     type: "yolo_obb"                            # Oriented bounding boxes (rotated boxes)
     device: "cuda:0"
-    confidence_threshold: 0.5
+    confidence_threshold: 0.1
+
+    #path to roi geojson file
+    roi_geojson_path: "/app/config/karachi_port2.geojson"
     
     # Model-Specific Folder Filtering
     all_folders: false
@@ -112,8 +116,8 @@ models:
     # Per-Model Tiling Configuration
     # Example: Model trained on 1024px tiles while global config uses 512px
     tile:
-      tile_size: 640                           # Different tile size (MUST match training)
-      overlap: 320                              # Different overlap (typically 25-50% of tile_size)
+      tile_size: 512                           # Different tile size (MUST match training)
+      overlap: 256                            # Different overlap (typically 25-50% of tile_size)
       normalization_mode: "auto"
       allow_resample: true
       iou_threshold: 0.75
@@ -123,9 +127,9 @@ models:
     outputs:
       write_tile_previews: false
       summary_csv: true
-  - name: "Yolo_plane_p"
-    weights_path: "/app/models/Yolo_plane_p.pt"  # Docker path - mount models here
-    type: "yolo"                                  # "yolo" or "yolo_obb"
+  - name: "yolo11x-obb.pt"
+    weights_path: "/app/models/yolo11x-obb.pt"  # Docker path - mount models here
+    type: "yolo_obb"                                  # "yolo" or "yolo_obb"
     device: "cuda:0"                              # Which GPU (ignored in hybrid_mode)
     confidence_threshold: 0.5                     # Minimum confidence score (0.0-1.0)
     
