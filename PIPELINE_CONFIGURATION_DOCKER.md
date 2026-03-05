@@ -15,12 +15,13 @@ This guide explains how to configure the Satellite Inference Pipeline when runni
 7. [Tiling Configuration](#tiling-configuration)
 8. [GPU Configuration](#gpu-configuration)
 9. [Model Configuration](#model-configuration)
-10. [Adding New Models](#adding-new-models)
-11. [Artifacts Configuration](#artifacts-configuration)
-12. [Logging Configuration](#logging-configuration)
-13. [Health Monitoring](#health-monitoring)
-14. [Dashboard Configuration](#dashboard-configuration)
-15. [Complete Example](#complete-example)
+ 10. [Per-Model ROI (Region of Interest)](#per-model-roi-region-of-interest)
+11. [Adding New Models](#adding-new-models)
+12. [Artifacts Configuration](#artifacts-configuration)
+13. [Logging Configuration](#logging-configuration)
+14. [Health Monitoring](#health-monitoring)
+15. [Dashboard Configuration](#dashboard-configuration)
+16. [Complete Example](#complete-example)
 
 ---
 
@@ -520,6 +521,169 @@ models:
 - **Description**: Whether to generate CSV summary files
 - **Default**: `true`
 - **Recommendation**: Keep `true` for analysis
+
+---
+
+## Per-Model ROI (Region of Interest)
+
+You can restrict each model to run only within specific geographic regions using **ROI GeoJSON files**.
+
+- **One ROI per model**: Add `roi_geojson_path` under the model config.
+- **ROI file**: A GeoJSON file in `/app/config` (or any container path under `/app/...`), mounted from `docker_data/config` on the host.
+- **Behavior**:
+  - If an image **does not intersect** the ROI → that model is **skipped** for that image.
+  - If an image **partially intersects** the ROI → only the intersecting part is processed.
+  - If **no ROI is configured** for a model → that model processes the **full image** (default behavior).
+  - If an image intersects **multiple polygons** in the same ROI file → intersections are **unioned** into a single processing region and processed once.
+
+### ROI GeoJSON Structure
+
+The ROI GeoJSON is a standard GeoJSON file. Only the **geometry** is used; `properties` are ignored.
+
+- **Recommended CRS**: WGS84 (`EPSG:4326`) with coordinates as `[longitude, latitude]`.
+- **Supported geometries**:
+  - `Polygon`
+  - `MultiPolygon` (inside a Feature)
+  - Multiple Features in a `FeatureCollection`
+
+Minimal example with a single rectangular ROI:
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "roi_plane_x"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [72.8000, 18.9000],
+          [73.0000, 18.9000],
+          [73.0000, 19.1000],
+          [72.8000, 19.1000],
+          [72.8000, 18.9000]
+        ]]
+      }
+    }
+  ]
+}
+```
+
+You can also include **multiple polygons** in the same file:
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "roi_1" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [72.8, 18.9],
+          [73.0, 18.9],
+          [73.0, 19.1],
+          [72.8, 19.1],
+          [72.8, 18.9]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "roi_2" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [73.1, 18.8],
+          [73.3, 18.8],
+          [73.3, 19.0],
+          [73.1, 19.0],
+          [73.1, 18.8]
+        ]]
+      }
+    }
+  ]
+}
+```
+
+If an image intersects both `roi_1` and `roi_2`, the pipeline:
+- Computes the intersection of the image footprint with each ROI.
+- Unions those intersections into a single region.
+- Tiles and processes that unioned region once.
+
+### Example: Enabling ROI for Models (Docker Paths)
+
+```yaml
+models:
+  - name: "Yolo_plane_x"
+    weights_path: "/app/models/Yolo_plane_x.pt"   # DO NOT CHANGE prefix
+    type: "yolo"
+    device: "cuda:0"
+    confidence_threshold: 0.5
+
+    # NEW: optional ROI for this model (container path)
+    roi_geojson_path: "/app/config/roi_Yolo_plane_x.geojson"
+
+    all_folders: false
+    folder_identities: ["qgis", "SAR", "jp2"]
+    tile:
+      tile_size: 256
+      overlap: 128
+      normalization_mode: "auto"
+      allow_resample: true
+      iou_threshold: 0.8
+      ioma_threshold: 0.75
+
+    outputs:
+      write_tile_previews: false
+      summary_csv: true
+
+  - name: "yolo11n-obb"
+    weights_path: "/app/models/yolo11n-obb.pt"    # DO NOT CHANGE prefix
+    type: "yolo_obb"
+    device: "cuda:0"
+    confidence_threshold: 0.6
+
+    # Optional ROI for this model (can be different from above)
+    roi_geojson_path: "/app/config/roi_yolo11n_obb.geojson"
+
+    all_folders: false
+    folder_identities: ["carto", "maxar", "jp2"]
+    tile:
+      tile_size: 1024
+      overlap: 512
+      normalization_mode: "auto"
+      allow_resample: true
+      iou_threshold: 0.75
+      ioma_threshold: 0.7
+
+    outputs:
+      write_tile_previews: false
+      summary_csv: true
+```
+
+### Where to Put ROI Files (Host vs Container)
+
+- **Host path** (edit these):  
+  - `docker_data/config/roi_Yolo_plane_x.geojson`  
+  - `docker_data/config/roi_yolo11n_obb.geojson`
+
+- **Container path** (used in `pipeline.yaml`):  
+  - `/app/config/roi_Yolo_plane_x.geojson`  
+  - `/app/config/roi_yolo11n_obb.geojson`
+
+**Important**:
+- Always use `/app/...` paths inside `pipeline.yaml` (Docker container paths).
+- Make sure the corresponding files exist under `docker_data/config/` on the host.
+
+This ROI configuration works together with the existing tiling and folder identity filters to ensure that:
+- Only images intersecting the ROI are processed by that model.
+- Only the intersecting regions are tiled and sent to the GPU.
+- Outputs remain in the original image coordinate system and can be overlaid directly.
 
 ---
 

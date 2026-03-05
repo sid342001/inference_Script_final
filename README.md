@@ -103,6 +103,110 @@ python dashboard_server.py
 
 The pipeline is configured via `config/pipeline.yaml`. Key sections:
 
+### Region of Interest (ROI) per model
+
+The ROI feature lets you restrict inference to specific geographic regions per model.
+
+- **Per-model setting**: Add `roi_geojson_path` to any model block that should use an ROI.
+- **One GeoJSON per model**: Each file can contain one or more polygons; all polygons are treated as the model’s ROI.
+- **CRS**: Define ROI polygons in WGS84 (`EPSG:4326`) unless you know they match the image CRS.
+- **Behavior**:
+  - If an image **does not intersect** the ROI → that model is **skipped** for that image.
+  - If an image **partially intersects** the ROI → only the intersecting part is processed.
+  - If **no ROI is configured** → the model processes the **full image** (existing behavior).
+  - If an image intersects **multiple ROI polygons** in the same file → intersections are **unioned** into a single processing region and processed once.
+
+Update your `config/pipeline.yaml` like this:
+
+```yaml
+models:
+  - name: "Yolo_plane_x"
+    weights_path: "D:/aks/sat-annotator-main/inference_Script/models/Yolo_plane_x.pt"
+    type: "yolo"
+    device: "cuda:0"
+    confidence_threshold: 0.5
+
+    # NEW: optional ROI for this model
+    roi_geojson_path: "D:/aks/sat-annotator-main/inference_Script/config/roi_Yolo_plane_x.geojson"
+
+    all_folders: false
+    folder_identities: ["qgis", "SAR", "jp2"]
+    tile:
+      tile_size: 256
+      overlap: 128
+      normalization_mode: "auto"
+      allow_resample: true
+      iou_threshold: 0.8
+      ioma_threshold: 0.75
+
+    outputs:
+      write_tile_previews: false
+      summary_csv: true
+
+  - name: "yolo11n-obb"
+    weights_path: "D:/aks/sat-annotator-main/inference_Script/models/yolo11n-obb.pt"
+    type: "yolo_obb"
+    device: "cuda:0"
+    confidence_threshold: 0.6
+
+    # Optional ROI for this model (can be different from above)
+    roi_geojson_path: "D:/aks/sat-annotator-main/inference_Script/config/roi_yolo11n_obb.geojson"
+
+    all_folders: false
+    folder_identities: ["carto", "maxar", "jp2"]
+    tile:
+      tile_size: 1024
+      overlap: 512
+      normalization_mode: "auto"
+      allow_resample: true
+      iou_threshold: 0.75
+      ioma_threshold: 0.7
+
+    outputs:
+      write_tile_previews: false
+      summary_csv: true
+```
+
+Place the ROI GeoJSON files in `config/` (or any path you prefer) and point `roi_geojson_path` to the full path. Each GeoJSON should contain one or more rectangular (or arbitrary) polygons covering the regions where you want inference to run.
+
+#### ROI GeoJSON structure
+
+The ROI GeoJSON is a standard GeoJSON file. Only the **geometry** is used; any `properties` are ignored.
+
+- **Recommended CRS**: WGS84 (`EPSG:4326`) with coordinates as `[longitude, latitude]`.
+- **Supported geometries**:
+  - `Polygon`
+  - `MultiPolygon` (inside a Feature)
+  - Multiple Features in a `FeatureCollection`
+
+Minimal example with a single rectangular ROI:
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "roi_example"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [72.8000, 18.9000],
+          [73.0000, 18.9000],
+          [73.0000, 19.1000],
+          [72.8000, 19.1000],
+          [72.8000, 18.9000]
+        ]]
+      }
+    }
+  ]
+}
+```
+
+You can also include **multiple polygons** in the same file; all are treated as ROI for that model. If an image intersects more than one polygon, the pipeline unions the intersections and processes that unioned region once.
+
 ### Watcher Configuration
 
 ```yaml
