@@ -2029,8 +2029,15 @@ class InferenceRunner:
                 if conf < handle.config.confidence_threshold:
                     continue
                 
-                # Convert to global coordinates
-                global_points = _globalize_polygon(obb, meta, tiler.width, tiler.height)
+                # Convert to global coordinates (always in full-image space)
+                # Use original image dimensions so clipping does not collapse
+                # coordinates when an ROI crop is applied.
+                global_points = _globalize_polygon(
+                    obb,
+                    meta,
+                    getattr(tiler, "original_width", tiler.width),
+                    getattr(tiler, "original_height", tiler.height),
+                )
                 
                 # Store detection for later NMS processing
                 detection = TileDetection(
